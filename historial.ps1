@@ -1,67 +1,116 @@
-Set-ExecutionPolicy Unrestricted -Scope LocalMachine -Force
-Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force		
-Install-Module -Name PSSQLite -Force 
+<#
+.SYNOPSIS
+Recolector modular de historiales de navegación
 
-# Importar el módulo pslite
-Import-Module PSSQLite
+.DESCRIPTION
+Cierra navegadores y copia sus archivos de historial a una ubicación específica
 
-# Ruta a la base de datos de historial de Chrome
-$dbPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History"
+.NOTES
+- Diseñado para expansión modular
+- Usa métodos no intrusivos
+#>
 
-# Verificar si el archivo de historial existe
-if (-not (Test-Path $dbPath)) {
-    Write-Host "El archivo de historial de Chrome no se encontró. Asegúrate de que Chrome esté cerrado." -ForegroundColor Red
-    exit
-}
-
-# Función para convertir la marca de tiempo de Chrome a una fecha legible
-function Convert-ChromeTime {
-    param (
-        [long]$chromeTime
+function Initialize-BackupEnvironment {
+    param(
+        [string]$BasePath = "$env:USERPROFILE\Documents\BrowserHistory"
     )
-    $epoch = [datetime]::FromFileTimeUtc(116444736000000000)
-    return $epoch.AddSeconds($chromeTime / 1000000)
+
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $targetFolder = Join-Path $BasePath $timestamp
+    
+    if (-not (Test-Path $targetFolder)) {
+        New-Item -Path $targetFolder -ItemType Directory -Force | Out-Null
+    }
+    
+    return $targetFolder
 }
 
-# Consultar la tabla 'urls' que contiene el historial de navegación
-$query = "SELECT url, title, last_visit_time FROM urls"
+function Close-Browsers {
+    param(
+        [string[]]$BrowserProcesses = @('chrome', 'msedge', 'firefox', 'msedgewebview2')
+    )
 
-# Ejecutar la consulta
-try {
-    $results = Invoke-SqliteQuery -Query $query -DataSource $dbPath
-
-    # Convertir las marcas de tiempo y preparar los datos para guardar
-    $output = $results | ForEach-Object {
-        $lastVisitTime = Convert-ChromeTime $_.last_visit_time
-        [PSCustomObject]@{
-            URL           = $_.url
-            Title         = $_.title
-            LastVisitTime = $lastVisitTime
+    Write-Host "Cerrando navegadores..." -ForegroundColor Yellow
+    
+    foreach ($process in $BrowserProcesses) {
+        try {
+            if (Get-Process $process -ErrorAction SilentlyContinue) {
+                Write-Verbose "Cerrando proceso: $process"
+                Stop-Process -Name $process -Force -ErrorAction Stop
+                Start-Sleep -Milliseconds 500  # Espera para liberación de archivos
+            }
+        }
+        catch {
+            Write-Warning "No se pudo cerrar $process : $_"
         }
     }
+}
 
-    # Mostrar los resultados en la consola
-    $output | Format-Table -AutoSize
+function Backup-BrowserData {
+    param(
+        [string]$TargetFolder,
+        [string]$BrowserName,
+        [string]$ProcessName,
+        [string]$SourcePath,
+        [string]$FileName
+    )
 
-    # Ruta de la carpeta donde se guardará el archivo
-    $outputFolder = "C:\Users"
-    $outputFilePath = Join-Path -Path $outputFolder -ChildPath "config.txt"
-
-    # Crear la carpeta si no existe
-    if (-not (Test-Path $outputFolder)) {
-        New-Item -ItemType Directory -Path $outputFolder | Out-Null
+    $result = [PSCustomObject]@{
+        Browser  = $BrowserName
+        Success  = $false
+        FilePath = $null
+        Error    = $null
     }
 
-    # Guardar los resultados en un archivo de texto
-    $output | ForEach-Object {
-        "URL: $($_.URL)"
-        "Título: $($_.Title)"
-        "Última visita: $($_.LastVisitTime)"
-        "----------------------------------------"
-    } | Out-File -FilePath $outputFilePath -Encoding UTF8
+    try {
+        if (-not (Test-Path $SourcePath)) {
+            throw "Archivo no encontrado"
+        }
 
-    Write-Host "El historial de Chrome se ha guardado en: $outputFilePath" -ForegroundColor Green
+        $destPath = Join-Path $TargetFolder $FileName
+        Copy-Item -Path $SourcePath -Destination $destPath -Force
+        
+        $result.Success = $true
+        $result.FilePath = $destPath
+    }
+    catch {
+        $result.Error = $_
+    }
+
+    return $result
 }
-catch {
-    Write-Host "Error al consultar el historial de Chrome: $_" -ForegroundColor Red
-}
+
+#------------------- EJECUCIÓN PRINCIPAL -------------------
+$targetFolder = Initialize-BackupEnvironment
+
+# 1. Cierre de navegadores (opcional, comentar si no se necesita)
+Close-Browsers
+
+# 2. Recolección de historiales
+$backupResults = @()
+
+# Chrome
+$backupResults += Backup-BrowserData -TargetFolder $targetFolder `
+    -BrowserName "Chrome" -ProcessName "chrome" `
+    -SourcePath "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History" `
+    -FileName "chrome_history.db"
+
+# Microsoft Edge
+$backupResults += Backup-BrowserData -TargetFolder $targetFolder `
+    -BrowserName "Edge" -ProcessName "msedge" `
+    -SourcePath "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\History" `
+    -FileName "edge_history.db"
+
+# Firefox
+$firefoxPath = Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles\*.default-release\places.sqlite" |
+               Select-Object -First 1 -ExpandProperty FullName
+
+$backupResults += Backup-BrowserData -TargetFolder $targetFolder `
+    -BrowserName "Firefox" -ProcessName "firefox" `
+    -SourcePath $firefoxPath `
+    -FileName "firefox_places.sqlite"
+
+# 3. Resultados
+$backupResults | Format-Table -AutoSize
+
+Write-Host "`nProceso completado. Archivos disponibles en: $targetFolder`n" -ForegroundColor Green
