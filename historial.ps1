@@ -14,7 +14,7 @@ try {
 catch {
     exit
 }
-
+# prueba
 Import-Module PSSQLite -ErrorAction SilentlyContinue
 
 function Close-Browsers {
