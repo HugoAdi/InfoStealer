@@ -169,10 +169,13 @@ $backupResults | Format-Table -AutoSize
 
 # 4. Enviar resultados a Discord
 $message = "Historiales recolectados:`n"
-$message += $backupResults | ForEach-Object {
+$message += ($backupResults | ForEach-Object {
     "$($_.Browser): $(if ($_.Success) {'exito'} else {'Error'}) - $($_.FilePath)"
-} -join "`n"
+}) -join "`n"
 
-Send-ToDiscord -WebhookUrl $discordWebhookUrl -Message $message
-
-Write-Host "`nProceso completado. Archivos disponibles en: $targetFolder`n" -ForegroundColor Green
+try {
+    Send-ToDiscord -WebhookUrl $discordWebhookUrl -Message $message
+}
+catch {
+    Write-Host "Error al enviar a Discord: $_" -ForegroundColor Red
+}
