@@ -171,7 +171,7 @@ $backupResults | Format-Table -AutoSize
 $message = "Historiales recolectados:`n"
 $message += ($backupResults | ForEach-Object {
     "$($_.Browser): $(if ($_.Success) {'exito'} else {'Error'}) - $($_.FilePath)"
-}) -join "`n"
+}) -join "`n"  # <-- Paréntesis críticos
 
 try {
     Send-ToDiscord -WebhookUrl $discordWebhookUrl -Message $message
